@@ -18,7 +18,7 @@ SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 921600
 SUB_CARRIERS = 192
 LOG_DIR = "/home/umatani/csi/Service/logs"
-CONFIG_FILE = "/home/umatani/csi/config.json"
+CONFIG_FILE = "/home/umatani/csi/Service/config.json"
 AUTO_CALIB_HOUR = 3 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -28,7 +28,7 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Wi-Fi CSI Radar (Filtered)</title>
+    <title>Wi-Fi CSI Radar (DC-Removal)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -47,7 +47,6 @@ HTML_PAGE = """
         button.record-on { background: #ff3333; color: white; animation: pulse 2s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
         
-        /* スライダー */
         .slider-container { width: 100%; display: flex; align-items: center; gap: 10px; margin-top: 5px; }
         .slider-label { width: 120px; font-size: 0.9rem; color: #aaa; text-align: right; }
         input[type=range] { flex-grow: 1; accent-color: #00d2ff; }
@@ -76,7 +75,7 @@ HTML_PAGE = """
             </div>
             <div class="panel-row" style="border-top: 1px solid #333; padding-top: 10px;">
                 <div class="slider-container">
-                    <span class="slider-label">SITTING Threshold:</span>
+                    <span class="slider-label">SITTING Thresh:</span>
                     <input type="range" id="sittingRange" min="2" max="50" step="0.5" value="25" oninput="updateThresholds()">
                     <span id="sittingVal" class="slider-val">25.0</span>
                 </div>
@@ -91,8 +90,8 @@ HTML_PAGE = """
             <div class="panel-row">
                  <div class="slider-container">
                     <span class="slider-label">Noise Filter:</span>
-                    <input type="range" id="filterRange" min="0.0" max="0.9" step="0.05" value="0.7" oninput="updateThresholds()">
-                    <span id="filterVal" class="slider-val">0.7</span>
+                    <input type="range" id="filterRange" min="0.01" max="0.5" step="0.01" value="0.1" oninput="updateThresholds()">
+                    <span id="filterVal" class="slider-val">0.1</span>
                 </div>
             </div>
 
@@ -126,13 +125,13 @@ HTML_PAGE = """
             data: {
                 labels: Array.from({length: 192}, (_, i) => i),
                 datasets: [{
-                    label: 'Amplitude', data: new Array(192).fill(0),
+                    label: 'Clean Signal (DC Removed)', data: new Array(192).fill(0),
                     borderColor: '#00d2ff', borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.1
                 }]
             },
             options: {
                 responsive: true, maintainAspectRatio: false, animation: false,
-                scales: { y: { beginAtZero: true, max: 60, grid: { color: '#222' } }, x: { display: false } },
+                scales: { y: { beginAtZero: true, max: 20, grid: { color: '#222' } }, x: { display: false } },
                 plugins: { legend: { display: false } }
             }
         });
@@ -146,11 +145,11 @@ HTML_PAGE = """
             
             for (var i = 0; i < width; i++) {
                 var val = diffArray[Math.floor((i / width) * diffArray.length)];
-                var t = (Math.min(val * 15, 255) / 255) ** 2; // 感度を少し上げました
+                var t = (Math.min(val * 20, 255) / 255); // 線形にしてみる
                 var r=0, g=0, b=0;
 
-                if (t < 0.05) { r=0; g=0; b=0; } 
-                else if (t < 0.4) { r = ((t-0.05)/0.35)*100; g=0; b=50+(((t-0.05)/0.35)*150); }
+                if (t < 0.1) { r=0; g=0; b=0; } 
+                else if (t < 0.4) { r = ((t-0.1)/0.3)*100; g=0; b=50+(((t-0.1)/0.3)*150); }
                 else if (t < 0.7) { r = 100+(((t-0.4)/0.3)*155); g=((t-0.4)/0.3)*100; b=200*(1-((t-0.4)/0.3)); }
                 else { r=255; g=100+(((t-0.7)/0.3)*155); b=((t-0.7)/0.3)*255; }
                 
@@ -161,14 +160,13 @@ HTML_PAGE = """
         }
 
         socket.on('connect', function() { socket.emit('get_config'); });
-
         socket.on('config_update', function(cfg) {
             document.getElementById('sittingRange').value = cfg.sitting_thresh;
             document.getElementById('sittingVal').innerText = cfg.sitting_thresh;
             document.getElementById('marginRange').value = cfg.margin;
             document.getElementById('marginVal').innerText = cfg.margin;
-            document.getElementById('filterRange').value = cfg.filter_alpha || 0.7;
-            document.getElementById('filterVal').innerText = cfg.filter_alpha || 0.7;
+            document.getElementById('filterRange').value = cfg.hp_filter || 0.1;
+            document.getElementById('filterVal').innerText = cfg.hp_filter || 0.1;
         });
 
         socket.on('update_data', function(msg) {
@@ -177,9 +175,9 @@ HTML_PAGE = """
             if (msg.diff) drawSpectrogram(msg.diff);
 
             document.getElementById('timestamp').innerText = msg.timestamp;
-            document.getElementById('scoreVal').innerText = msg.score.toFixed(1);
-            document.getElementById('baseVal').innerText = msg.base_noise.toFixed(1);
-            document.getElementById('threshVal').innerText = msg.threshold.toFixed(1);
+            document.getElementById('scoreVal').innerText = msg.score.toFixed(2);
+            document.getElementById('baseVal').innerText = msg.base_noise.toFixed(2);
+            document.getElementById('threshVal').innerText = msg.threshold.toFixed(2);
             
             var statusEl = document.getElementById('statusText');
             statusEl.innerText = msg.status;
@@ -199,25 +197,24 @@ HTML_PAGE = """
                 else { statusEl.classList.add("status-safe"); csiChart.data.datasets[0].borderColor = '#444444'; }
             }
         });
-
+        
+        // ... (Socket/File Functions same as before) ...
         socket.on('file_list', function(files) {
             var select = document.getElementById('fileSelect');
             select.innerHTML = "";
             files.forEach(function(f) { var option = document.createElement("option"); option.text = f; option.value = f; select.add(option); });
         });
-
         function updateThresholds() {
             var sitting = parseFloat(document.getElementById('sittingRange').value);
             var margin = parseFloat(document.getElementById('marginRange').value);
-            var alpha = parseFloat(document.getElementById('filterRange').value);
+            var hp = parseFloat(document.getElementById('filterRange').value);
             
             document.getElementById('sittingVal').innerText = sitting;
             document.getElementById('marginVal').innerText = margin;
-            document.getElementById('filterVal').innerText = alpha;
+            document.getElementById('filterVal').innerText = hp;
             
-            socket.emit('update_config', {sitting_thresh: sitting, margin: margin, filter_alpha: alpha});
+            socket.emit('update_config', {sitting_thresh: sitting, margin: margin, hp_filter: hp});
         }
-
         function setMode(mode) {
             socket.emit('change_mode', {mode: mode});
             document.getElementById('btnLive').className = (mode === 'live') ? 'active' : 'inactive';
@@ -225,7 +222,6 @@ HTML_PAGE = """
             document.getElementById('liveControls').style.display = (mode === 'live') ? 'flex' : 'none';
             document.getElementById('historyControls').style.display = (mode === 'history') ? 'block' : 'none';
         }
-
         function toggleRecord() {
             isRecording = !isRecording;
             socket.emit('toggle_logging', {record: isRecording});
@@ -233,7 +229,6 @@ HTML_PAGE = """
             if (isRecording) { btn.innerText = "REC: ON"; btn.className = "record-on"; }
             else { btn.innerText = "REC: OFF"; btn.className = "inactive"; }
         }
-        
         function startCalibration() { if(confirm("誰もいない状態で実行してください")) socket.emit('start_calibration'); }
         function loadSelectedFile() { var file = document.getElementById('fileSelect').value; if (file) socket.emit('load_file', {filename: file}); }
         window.onload = function() { var c = document.getElementById('diffCanvas'); c.width = c.parentElement.clientWidth; c.height = 250; }
@@ -253,16 +248,15 @@ class CSIUltimateService:
         self.playback_active = False
         
         self.prev_amp = None
-        # ★追加: フィルタリングされた値を保存する変数
-        self.filtered_amp = None
+        self.avg_amp = None # ★ DC除去用の長時間平均
         
         self.amp_history = deque(maxlen=50) 
-        self.base_noise_level = 2.0  
+        self.base_noise_level = 0.5  # DC除去後は値が小さくなるので初期値も小さく
         
         self.config = {
-            'margin': 4.5,
-            'sitting_thresh': 25.0,
-            'filter_alpha': 0.7 # 0.0=フィルタ最大(遅い), 1.0=フィルタなし(速い・ノイズ多)
+            'margin': 1.5,          # DC除去後はマージンも小さくて済む
+            'sitting_thresh': 5.0,
+            'hp_filter': 0.05       # 平均追従係数 (小さいほどゆっくり追従=強力なDC除去)
         }
         self.load_config()
         
@@ -312,30 +306,33 @@ class CSIUltimateService:
     def handle_config_update(self, data):
         self.config['margin'] = float(data['margin'])
         self.config['sitting_thresh'] = float(data['sitting_thresh'])
-        self.config['filter_alpha'] = float(data['filter_alpha'])
+        self.config['hp_filter'] = float(data['hp_filter'])
         self.save_config()
 
     def send_config(self): emit('config_update', self.config)
 
     def process_data(self, timestamp, amplitude):
-        # 1. ローパスフィルタ処理 (Noise Reduction)
-        alpha = self.config.get('filter_alpha', 0.7)
+        # ★★★ DCオフセット除去 (ハイパスフィルタ) ★★★
+        # 長期間の平均(ベースライン)をゆっくり更新
+        alpha = self.config.get('hp_filter', 0.05)
         
-        if self.filtered_amp is None:
-            self.filtered_amp = amplitude
+        if self.avg_amp is None:
+            self.avg_amp = amplitude
         else:
-            # 前回の値と今回の値を混ぜる (平滑化)
-            # alphaが小さいほどフィルタが強くかかり、数値が安定する
-            self.filtered_amp = (self.filtered_amp * (1.0 - alpha)) + (amplitude * alpha)
+            self.avg_amp = (self.avg_amp * (1.0 - alpha)) + (amplitude * alpha)
+            
+        # 今の値からベースラインを引く ＝ 純粋な動き成分 (DC成分は消える)
+        clean_amp = np.abs(amplitude - self.avg_amp)
 
-        # 2. 履歴には「フィルタ済みのきれいなデータ」を入れる
-        self.amp_history.append(self.filtered_amp)
+        # 履歴には「きれいになったデータ」を入れる
+        self.amp_history.append(clean_amp)
         
-        # 3. 差分計算 (スペクトログラム用 - ここは生データで見せるかフィルタで見せるかはお好みですが、変化を見たいのでフィルタ後を使います)
+        # 差分(スペクトログラム用)
         diff = np.zeros(SUB_CARRIERS)
         if self.prev_amp is not None:
-            diff = np.abs(self.filtered_amp - self.prev_amp)
-        self.prev_amp = self.filtered_amp
+            # 表示用に差分計算 (生データ同士の比較の方が視覚的に面白い場合もあるが、ここではフィルタ後を採用)
+            diff = clean_amp 
+        self.prev_amp = clean_amp
 
         status = "BUFFERING"
         score = 0.0
@@ -345,14 +342,17 @@ class CSIUltimateService:
         
         if len(self.amp_history) == 50:
             history_np = np.array(self.amp_history)
-            q75, q25 = np.percentile(history_np, [75, 25], axis=0)
-            # IQR Score
-            score = np.mean(q75 - q25)
+            
+            # ★★★ 判定ロジック変更: MAD (平均絶対偏差) ★★★
+            # DC除去済みなので、単純な平均値がそのまま「動きの激しさ」になる
+            # IQRのようにデータを捨てないので、微細な呼吸も全てスコアに乗る
+            score = np.mean(history_np) * 10.0 # スケール調整(見やすくするため)
             
             if self.is_calibrating:
                 status = "CALIBRATING..."
                 self.calibration_buffer.append(score)
                 if len(self.calibration_buffer) > 200:
+                    # 最大値をベースにする
                     new_base = np.percentile(self.calibration_buffer, 95)
                     self.base_noise_level = new_base
                     self.is_calibrating = False
@@ -364,7 +364,7 @@ class CSIUltimateService:
 
         self.socketio.emit('update_data', {
             'timestamp': timestamp,
-            'amplitude': amplitude.tolist(), # グラフには生データを表示(遅延なくすため)
+            'amplitude': clean_amp.tolist(), # ★グラフにはDC除去後の「0付近の波」を表示
             'diff': diff.tolist(),
             'status': status,
             'score': score,
