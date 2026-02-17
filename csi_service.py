@@ -19,8 +19,6 @@ BAUD_RATE = 921600
 SUB_CARRIERS = 192
 LOG_DIR = "/home/umatani/csi/Service/logs"
 CONFIG_FILE = "/home/umatani/csi/config.json"
-
-# 自動キャリブレーション時間
 AUTO_CALIB_HOUR = 3 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -30,7 +28,7 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Wi-Fi CSI Radar (Pro)</title>
+    <title>Wi-Fi CSI Radar (Filtered)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -44,14 +42,12 @@ HTML_PAGE = """
         select, button { padding: 8px 12px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
         button.active { background: #00d2ff; color: #000; }
         button.inactive { background: #333; color: #888; }
-        
         button.calib-btn { background: #d200ff; color: white; border: 1px solid #a000cc; }
         button.calib-active { background: #d200ff; color: white; animation: pulse 1s infinite; }
-        
         button.record-on { background: #ff3333; color: white; animation: pulse 2s infinite; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
         
-        /* スライダーエリア */
+        /* スライダー */
         .slider-container { width: 100%; display: flex; align-items: center; gap: 10px; margin-top: 5px; }
         .slider-label { width: 120px; font-size: 0.9rem; color: #aaa; text-align: right; }
         input[type=range] { flex-grow: 1; accent-color: #00d2ff; }
@@ -66,7 +62,6 @@ HTML_PAGE = """
         .chart-container { background: #000; border: 1px solid #222; border-radius: 4px; margin-bottom: 10px; position: relative; }
         canvas { display: block; width: 100%; }
         #diffCanvas { height: 250px; background: #000; }
-        
         .info-text { font-family: monospace; font-size: 1.1rem; color: #aaa; }
     </style>
 </head>
@@ -77,21 +72,27 @@ HTML_PAGE = """
                 <button id="btnLive" onclick="setMode('live')" class="active">LIVE</button>
                 <button id="btnHistory" onclick="setMode('history')" class="inactive">HISTORY</button>
                 <button id="btnRecord" onclick="toggleRecord()">REC: ON</button>
-                <button id="btnCalib" class="calib-btn" onclick="startCalibration()">AUTO CALIB (Empty)</button>
+                <button id="btnCalib" class="calib-btn" onclick="startCalibration()">AUTO CALIB</button>
             </div>
-            
             <div class="panel-row" style="border-top: 1px solid #333; padding-top: 10px;">
                 <div class="slider-container">
                     <span class="slider-label">SITTING Threshold:</span>
-                    <input type="range" id="sittingRange" min="5" max="50" step="0.5" value="25" oninput="updateThresholds()">
+                    <input type="range" id="sittingRange" min="2" max="50" step="0.5" value="25" oninput="updateThresholds()">
                     <span id="sittingVal" class="slider-val">25.0</span>
                 </div>
             </div>
             <div class="panel-row">
                  <div class="slider-container">
                     <span class="slider-label">EMPTY Margin:</span>
-                    <input type="range" id="marginRange" min="1" max="10" step="0.1" value="4.5" oninput="updateThresholds()">
+                    <input type="range" id="marginRange" min="0.5" max="10" step="0.1" value="4.5" oninput="updateThresholds()">
                     <span id="marginVal" class="slider-val">4.5</span>
+                </div>
+            </div>
+            <div class="panel-row">
+                 <div class="slider-container">
+                    <span class="slider-label">Noise Filter:</span>
+                    <input type="range" id="filterRange" min="0.0" max="0.9" step="0.05" value="0.7" oninput="updateThresholds()">
+                    <span id="filterVal" class="slider-val">0.7</span>
                 </div>
             </div>
 
@@ -111,12 +112,8 @@ HTML_PAGE = """
             <span id="statusText" class="status-safe">EMPTY</span>
         </div>
 
-        <div class="chart-container">
-            <canvas id="csiChart"></canvas>
-        </div>
-        <div class="chart-container" style="border-top: 2px solid #333;">
-            <canvas id="diffCanvas"></canvas>
-        </div>
+        <div class="chart-container"><canvas id="csiChart"></canvas></div>
+        <div class="chart-container" style="border-top: 2px solid #333;"><canvas id="diffCanvas"></canvas></div>
     </div>
 
     <script>
@@ -124,7 +121,6 @@ HTML_PAGE = """
         var isRecording = true;
         var diffCtx = document.getElementById('diffCanvas').getContext('2d');
         
-        // --- Chart.js ---
         var csiChart = new Chart(document.getElementById('csiChart').getContext('2d'), {
             type: 'line',
             data: {
@@ -141,7 +137,6 @@ HTML_PAGE = """
             }
         });
 
-        // --- Spectrogram ---
         function drawSpectrogram(diffArray) {
             var width = diffCanvas.width;
             var height = diffCanvas.height;
@@ -151,7 +146,7 @@ HTML_PAGE = """
             
             for (var i = 0; i < width; i++) {
                 var val = diffArray[Math.floor((i / width) * diffArray.length)];
-                var t = (Math.min(val * 10, 255) / 255) ** 2;
+                var t = (Math.min(val * 15, 255) / 255) ** 2; // 感度を少し上げました
                 var r=0, g=0, b=0;
 
                 if (t < 0.05) { r=0; g=0; b=0; } 
@@ -165,18 +160,15 @@ HTML_PAGE = """
             diffCtx.putImageData(rowImage, 0, 0);
         }
 
-        // --- Socket Events ---
-        socket.on('connect', function() {
-            // 接続時に現在の設定値をリクエスト
-            socket.emit('get_config');
-        });
+        socket.on('connect', function() { socket.emit('get_config'); });
 
         socket.on('config_update', function(cfg) {
-            // サーバーから設定値を受信してスライダーに反映
             document.getElementById('sittingRange').value = cfg.sitting_thresh;
             document.getElementById('sittingVal').innerText = cfg.sitting_thresh;
             document.getElementById('marginRange').value = cfg.margin;
             document.getElementById('marginVal').innerText = cfg.margin;
+            document.getElementById('filterRange').value = cfg.filter_alpha || 0.7;
+            document.getElementById('filterVal').innerText = cfg.filter_alpha || 0.7;
         });
 
         socket.on('update_data', function(msg) {
@@ -191,54 +183,46 @@ HTML_PAGE = """
             
             var statusEl = document.getElementById('statusText');
             statusEl.innerText = msg.status;
-            
             statusEl.className = "";
+            
             if (msg.status === "CALIBRATING...") {
                 statusEl.classList.add("status-calib");
                 csiChart.data.datasets[0].borderColor = '#d200ff';
                 document.getElementById('btnCalib').innerText = "Running...";
                 document.getElementById('btnCalib').className = "calib-btn calib-active";
             } else {
-                document.getElementById('btnCalib').innerText = "AUTO CALIB (Empty)";
+                document.getElementById('btnCalib').innerText = "AUTO CALIB";
                 document.getElementById('btnCalib').className = "calib-btn";
                 
-                if (msg.status === "WALKING") {
-                    statusEl.classList.add("status-detected");
-                    csiChart.data.datasets[0].borderColor = '#ff3333';
-                } else if (msg.status === "SITTING") {
-                    statusEl.classList.add("status-sitting");
-                    csiChart.data.datasets[0].borderColor = '#00ffff';
-                } else {
-                    statusEl.classList.add("status-safe");
-                    csiChart.data.datasets[0].borderColor = '#444444';
-                }
+                if (msg.status === "WALKING") { statusEl.classList.add("status-detected"); csiChart.data.datasets[0].borderColor = '#ff3333'; }
+                else if (msg.status === "SITTING") { statusEl.classList.add("status-sitting"); csiChart.data.datasets[0].borderColor = '#00ffff'; }
+                else { statusEl.classList.add("status-safe"); csiChart.data.datasets[0].borderColor = '#444444'; }
             }
         });
 
         socket.on('file_list', function(files) {
             var select = document.getElementById('fileSelect');
             select.innerHTML = "";
-            files.forEach(function(f) {
-                var option = document.createElement("option"); option.text = f; option.value = f; select.add(option);
-            });
+            files.forEach(function(f) { var option = document.createElement("option"); option.text = f; option.value = f; select.add(option); });
         });
 
-        // --- Functions ---
         function updateThresholds() {
             var sitting = parseFloat(document.getElementById('sittingRange').value);
             var margin = parseFloat(document.getElementById('marginRange').value);
+            var alpha = parseFloat(document.getElementById('filterRange').value);
             
             document.getElementById('sittingVal').innerText = sitting;
             document.getElementById('marginVal').innerText = margin;
+            document.getElementById('filterVal').innerText = alpha;
             
-            socket.emit('update_config', {sitting_thresh: sitting, margin: margin});
+            socket.emit('update_config', {sitting_thresh: sitting, margin: margin, filter_alpha: alpha});
         }
 
         function setMode(mode) {
             socket.emit('change_mode', {mode: mode});
             document.getElementById('btnLive').className = (mode === 'live') ? 'active' : 'inactive';
             document.getElementById('btnHistory').className = (mode === 'history') ? 'active' : 'inactive';
-            document.getElementById('liveControls').style.display = (mode === 'live') ? 'flex' : 'none'; // RECボタンなどは常に表示に変更してもよい
+            document.getElementById('liveControls').style.display = (mode === 'live') ? 'flex' : 'none';
             document.getElementById('historyControls').style.display = (mode === 'history') ? 'block' : 'none';
         }
 
@@ -250,22 +234,9 @@ HTML_PAGE = """
             else { btn.innerText = "REC: OFF"; btn.className = "inactive"; }
         }
         
-        function startCalibration() {
-            if(confirm("誰もいない状態で実行してください。開始しますか？")) {
-                socket.emit('start_calibration');
-            }
-        }
-
-        function loadSelectedFile() {
-            var file = document.getElementById('fileSelect').value;
-            if (file) socket.emit('load_file', {filename: file});
-        }
-        
-        window.onload = function() {
-            var c = document.getElementById('diffCanvas');
-            c.width = c.parentElement.clientWidth;
-            c.height = 250;
-        }
+        function startCalibration() { if(confirm("誰もいない状態で実行してください")) socket.emit('start_calibration'); }
+        function loadSelectedFile() { var file = document.getElementById('fileSelect').value; if (file) socket.emit('load_file', {filename: file}); }
+        window.onload = function() { var c = document.getElementById('diffCanvas'); c.width = c.parentElement.clientWidth; c.height = 250; }
     </script>
 </body>
 </html>
@@ -282,15 +253,16 @@ class CSIUltimateService:
         self.playback_active = False
         
         self.prev_amp = None
+        # ★追加: フィルタリングされた値を保存する変数
+        self.filtered_amp = None
+        
         self.amp_history = deque(maxlen=50) 
+        self.base_noise_level = 2.0  
         
-        # --- キャリブレーション & 設定 ---
-        self.base_noise_level = 2.0  # ノイズフロア
-        
-        # 設定のロード (なければデフォルト)
         self.config = {
-            'margin': 4.5,          # Empty判定ライン = Base + Margin
-            'sitting_thresh': 25.0  # Walking判定ライン
+            'margin': 4.5,
+            'sitting_thresh': 25.0,
+            'filter_alpha': 0.7 # 0.0=フィルタ最大(遅い), 1.0=フィルタなし(速い・ノイズ多)
         }
         self.load_config()
         
@@ -315,72 +287,66 @@ class CSIUltimateService:
                 with open(CONFIG_FILE, 'r') as f:
                     saved_conf = json.load(f)
                     self.config.update(saved_conf)
-                print(f"Config loaded: {self.config}")
-            except Exception as e:
-                print(f"Config load error: {e}")
+            except: pass
 
     def save_config(self):
         try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.config, f)
-        except Exception as e:
-            print(f"Config save error: {e}")
+            with open(CONFIG_FILE, 'w') as f: json.dump(self.config, f)
+        except: pass
 
     def stop_handler(self, signum, frame):
-        print("Stopping Service...")
-        self.save_config() # 終了時に保存
+        self.save_config()
         self.is_running = False
         sys.exit(0)
 
-    def index(self):
-        return render_template_string(HTML_PAGE)
-
-    def handle_mode_change(self, data):
-        self.mode = data['mode']
+    def index(self): return render_template_string(HTML_PAGE)
+    def handle_mode_change(self, data): self.mode = data['mode']; self.handle_file_list()
+    def handle_file_list(self):
         if self.mode == 'history':
             files = sorted(glob.glob(os.path.join(LOG_DIR, "csi_*.txt")), reverse=True)
-            display_files = [os.path.basename(f) for f in files]
-            emit('file_list', display_files)
-
-    def handle_logging_toggle(self, data):
-        self.is_logging = data['record']
-
-    def handle_file_load(self, data):
-        self.history_file = os.path.join(LOG_DIR, data['filename'])
-        self.playback_active = True
-
-    def handle_manual_calib(self):
-        print("Manual Calibration Started")
-        self.is_calibrating = True
-        self.calibration_buffer = []
-
+            emit('file_list', [os.path.basename(f) for f in files])
+    def handle_logging_toggle(self, data): self.is_logging = data['record']
+    def handle_file_load(self, data): self.history_file = os.path.join(LOG_DIR, data['filename']); self.playback_active = True
+    def handle_manual_calib(self): self.is_calibrating = True; self.calibration_buffer = []
+    
     def handle_config_update(self, data):
-        # スライダーから受け取った値を反映
         self.config['margin'] = float(data['margin'])
         self.config['sitting_thresh'] = float(data['sitting_thresh'])
-        # 即時保存
+        self.config['filter_alpha'] = float(data['filter_alpha'])
         self.save_config()
 
-    def send_config(self):
-        emit('config_update', self.config)
+    def send_config(self): emit('config_update', self.config)
 
     def process_data(self, timestamp, amplitude):
+        # 1. ローパスフィルタ処理 (Noise Reduction)
+        alpha = self.config.get('filter_alpha', 0.7)
+        
+        if self.filtered_amp is None:
+            self.filtered_amp = amplitude
+        else:
+            # 前回の値と今回の値を混ぜる (平滑化)
+            # alphaが小さいほどフィルタが強くかかり、数値が安定する
+            self.filtered_amp = (self.filtered_amp * (1.0 - alpha)) + (amplitude * alpha)
+
+        # 2. 履歴には「フィルタ済みのきれいなデータ」を入れる
+        self.amp_history.append(self.filtered_amp)
+        
+        # 3. 差分計算 (スペクトログラム用 - ここは生データで見せるかフィルタで見せるかはお好みですが、変化を見たいのでフィルタ後を使います)
         diff = np.zeros(SUB_CARRIERS)
         if self.prev_amp is not None:
-            diff = np.abs(amplitude - self.prev_amp)
-        self.prev_amp = amplitude
+            diff = np.abs(self.filtered_amp - self.prev_amp)
+        self.prev_amp = self.filtered_amp
 
-        self.amp_history.append(amplitude)
         status = "BUFFERING"
         score = 0.0
         
-        # 現在の閾値を計算
         current_empty_thresh = self.base_noise_level + self.config['margin']
         current_sitting_thresh = self.config['sitting_thresh']
         
         if len(self.amp_history) == 50:
             history_np = np.array(self.amp_history)
             q75, q25 = np.percentile(history_np, [75, 25], axis=0)
+            # IQR Score
             score = np.mean(q75 - q25)
             
             if self.is_calibrating:
@@ -392,17 +358,13 @@ class CSIUltimateService:
                     self.is_calibrating = False
                     self.calibration_buffer = []
             else:
-                # ★動的に設定された閾値を使用
-                if score < current_empty_thresh:
-                    status = "EMPTY"
-                elif score < current_sitting_thresh:
-                    status = "SITTING"
-                else:                
-                    status = "WALKING"
+                if score < current_empty_thresh: status = "EMPTY"
+                elif score < current_sitting_thresh: status = "SITTING"
+                else: status = "WALKING"
 
         self.socketio.emit('update_data', {
             'timestamp': timestamp,
-            'amplitude': amplitude.tolist(),
+            'amplitude': amplitude.tolist(), # グラフには生データを表示(遅延なくすため)
             'diff': diff.tolist(),
             'status': status,
             'score': score,
@@ -412,33 +374,25 @@ class CSIUltimateService:
 
     def worker(self):
         ser = None
-        try:
-            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
-        except Exception as e:
-            print(f"Serial Error: {e}")
+        try: ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        except: pass
 
         while self.is_running:
             now = datetime.datetime.now()
             if now.hour == AUTO_CALIB_HOUR:
                 if not self.calibrated_today:
-                    self.is_calibrating = True
-                    self.calibration_buffer = []
-                    self.calibrated_today = True
-            else:
-                self.calibrated_today = False
+                    self.is_calibrating = True; self.calibration_buffer = []; self.calibrated_today = True
+            else: self.calibrated_today = False
 
             if self.mode == 'live':
-                if ser is None: 
-                    time.sleep(1)
-                    continue
+                if ser is None: time.sleep(1); continue
                 try:
                     line = ser.readline().decode('utf-8', errors='ignore').strip()
                     if "CSI_DATA" in line:
                         ts_str = now.strftime('%H:%M:%S.%f')[:-3]
                         if self.is_logging:
                             fname = f"csi_{now.strftime('%Y%m%d_%H')}.txt"
-                            with open(os.path.join(LOG_DIR, fname), "a") as f:
-                                f.write(f"{now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]},{line}\n")
+                            with open(os.path.join(LOG_DIR, fname), "a") as f: f.write(f"{now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]},{line}\n")
                         match = re.search(r'\"\[(.*?)\]\"', line)
                         if match:
                             vals = [int(x) for x in match.group(1).split(',') if x.strip()]
@@ -447,15 +401,14 @@ class CSIUltimateService:
                                 amp = np.sqrt(c[0::2]**2 + c[1::2]**2)
                                 self.process_data(ts_str, amp)
                 except: pass
-
             elif self.mode == 'history':
                 if self.history_file and self.playback_active:
                     try:
                         with open(self.history_file, 'r') as f:
                             for line in f:
-                                if self.mode != 'history' or not self.playback_active: break
+                                if not self.playback_active: break
                                 parts = line.split(',', 1)
-                                if len(parts) < 2: continue
+                                if len(parts)<2: continue
                                 ts = parts[0].split(' ')[1]
                                 match = re.search(r'\"\[(.*?)\]\"', parts[1])
                                 if match:
@@ -467,8 +420,7 @@ class CSIUltimateService:
                                         time.sleep(0.04)
                         self.playback_active = False
                     except: self.playback_active = False
-                else:
-                    time.sleep(0.5)
+                else: time.sleep(0.5)
 
     def start(self):
         t = threading.Thread(target=self.worker, daemon=True)
