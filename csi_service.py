@@ -332,24 +332,35 @@ class CSIUltimateService:
                     f_sub_var_mean = np.mean(sub_vars) * 10.0
                     f_sub_var_max = np.max(sub_vars) * 10.0
 
-                    # 特徴量リストを作成して推論
+# 特徴量リストを作成して推論
                     features = [[f_mean, f_std, f_max, f_min, f_range, f_sub_var_mean, f_sub_var_max]]
                     raw_prediction = self.ai_model.predict(features)[0] # 0:EMPTY, 1:SITTING, 2:WALKING
                     
-                    # ★ 単発の結果をバッファに保存
+                    # ★★★ 追加：物理エネルギーによる絶対無人ゲート ★★★
+                    # AIが「座っている(1)」と判定しても、実際の波形の揺れ(score)が
+                    # 設定したベースノイズ以下のスッカスカな状態なら、強制的に「EMPTY(0)」に上書きする
+                    current_empty_thresh = self.base_noise_level + self.config['margin']
+                    if score < current_empty_thresh:
+                        raw_prediction = 0
+                    
+                    # 単発の結果をバッファに保存
                     self.prediction_buffer.append(raw_prediction)
                     
-                    # ★ 平滑化ロジック (在室キープ)
-                    # バッファ(過去約30秒)の中に1つでも「WALKING(2)」があればWALKING
-                    # なければ、1つでも「SITTING(1)」があればSITTING
-                    # 完全に30秒間ずっと「EMPTY(0)」だった時だけEMPTYにする
-                    if 2 in self.prediction_buffer:
-                        status = "WALKING"
-                    elif 1 in self.prediction_buffer:
-                        status = "SITTING"
-                    else:
-                        status = "EMPTY"
+                    # 平滑化ロジック (ノイズ除去 ＋ 在室キープ)
+                    buf_len = len(self.prediction_buffer)
+                    if buf_len > 0:
+                        walking_count = self.prediction_buffer.count(2)
+                        sitting_count = self.prediction_buffer.count(1)
                         
+                        noise_ignore_thresh = buf_len * 0.05 # 5%に戻してOKです
+                        
+                        if walking_count > noise_ignore_thresh:
+                            status = "WALKING"
+                        elif (sitting_count + walking_count) > noise_ignore_thresh:
+                            status = "SITTING"
+                        else:
+                            status = "EMPTY"
+
                 # ★★★ フォールバック (AIがない場合はこれまでの閾値ルールで判定) ★★★
                 else:
                     current_empty_thresh = self.base_noise_level + self.config['margin']
